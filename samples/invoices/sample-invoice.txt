@@ -1,0 +1,19 @@
+INVOICE
+Invoice #: INV-2024-001
+Date: January 25, 2025
+
+Bill To:
+Acme Corporation
+123 Business Street
+New York, NY 10001
+
+Item Description         Quantity    Price     Total
+Widget Pro              10          $25.00    $250.00
+Service Package         1           $150.00   $150.00
+Premium Support         1           $100.00   $100.00
+
+Subtotal: $500.00
+Tax (8%): $40.00
+Total: $540.00
+
+Payment Due: February 25, 2025
