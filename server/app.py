@@ -133,9 +133,13 @@ async def process_image_with_watsonx(image_data: bytes) -> Dict[str, Any]:
         url = f"{WATSONX_URL}/ml/v1/text/chat?version=2023-05-29"
         
         # System prompt
-        system_prompt = """You are an advanced entity extraction system. Analyze this document image and extract ALL entities with their values in a highly structured format.
+        system_prompt = """You are an advanced entity extraction system. Analyze this document image and extract ONLY meaningful entities with their values.
 
-CRITICAL: Focus on extracting EVERY entity (person names, organizations, dates, amounts, addresses, phone numbers, emails, IDs, etc.) from the document.
+CRITICAL: 
+- Extract ONLY actual entities that have clear values (names, organizations, dates, amounts, addresses, etc.)
+- DO NOT include undefined, unclear, or meaningless data
+- DO NOT extract raw unstructured text
+- Focus on structured, meaningful information only
 
 Provide the extracted information in the following JSON format:
 {
@@ -169,9 +173,6 @@ Provide the extracted information in the following JSON format:
             {"entity": "entity name", "value": "entity value", "type": "classification"}
         ]
     },
-    "extracted_text": {
-        "raw_text": "complete text from the document"
-    },
     "metadata": {
         "language": "detected language",
         "confidence": "high/medium/low",
@@ -180,7 +181,12 @@ Provide the extracted information in the following JSON format:
     }
 }
 
-IMPORTANT: Extract EVERY piece of information as an entity. Be thorough and precise. Return ONLY valid JSON."""
+IMPORTANT: 
+- Only include entity categories that have actual data
+- Each entity must have a meaningful value
+- Omit empty arrays
+- DO NOT include raw text extraction
+- Return ONLY valid JSON"""
 
         # Request body
         body = {
@@ -255,9 +261,6 @@ IMPORTANT: Extract EVERY piece of information as an entity. Be thorough and prec
             return {
                 "document_type": "unknown",
                 "entities": {},
-                "extracted_text": {
-                    "raw_text": response_text
-                },
                 "metadata": {
                     "language": "unknown",
                     "confidence": "low",
@@ -276,8 +279,17 @@ IMPORTANT: Extract EVERY piece of information as an entity. Be thorough and prec
 async def process_multiple_images(images: List[bytes]) -> Dict[str, Any]:
     """Process multiple images (e.g., from PDF pages) and combine results"""
     all_results = []
-    combined_text = []
-    combined_structured_data = {}
+    combined_entities = {
+        "people": [],
+        "organizations": [],
+        "dates": [],
+        "amounts": [],
+        "addresses": [],
+        "identifiers": [],
+        "contact_info": [],
+        "items": [],
+        "other_entities": []
+    }
     
     for i, image_data in enumerate(images):
         try:
@@ -285,13 +297,11 @@ async def process_multiple_images(images: List[bytes]) -> Dict[str, Any]:
             result['page_number'] = i + 1
             all_results.append(result)
             
-            # Combine raw text
-            combined_text.append(f"--- Page {i + 1} ---")
-            combined_text.append(result['extracted_text']['raw_text'])
-            
-            # Combine structured data
-            if result['extracted_text']['structured_data']:
-                combined_structured_data[f'page_{i + 1}'] = result['extracted_text']['structured_data']
+            # Combine entities from each page
+            if 'entities' in result:
+                for entity_type, entities in result['entities'].items():
+                    if entity_type in combined_entities and isinstance(entities, list):
+                        combined_entities[entity_type].extend(entities)
                 
         except Exception as e:
             logger.error(f"Error processing page {i + 1}: {str(e)}")
@@ -300,14 +310,14 @@ async def process_multiple_images(images: List[bytes]) -> Dict[str, Any]:
                 'error': str(e)
             })
     
+    # Remove empty entity arrays
+    combined_entities = {k: v for k, v in combined_entities.items() if v}
+    
     # Return combined results
     return {
         "document_type": "multi-page document",
         "total_pages": len(images),
-        "extracted_text": {
-            "raw_text": "\n\n".join(combined_text),
-            "structured_data": combined_structured_data
-        },
+        "entities": combined_entities,
         "metadata": {
             "language": all_results[0].get('metadata', {}).get('language', 'unknown') if all_results else 'unknown',
             "confidence": "medium",

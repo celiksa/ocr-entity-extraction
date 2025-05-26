@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, FileImage, Loader2, FileText, Copy, Download, ChevronRight, ChevronDown, Folder, FolderOpen, User, Building2, Calendar, DollarSign, MapPin, Hash, Phone, Package, Tag } from 'lucide-react';
+import { Upload, FileImage, Loader2, FileText, Download, ChevronRight, ChevronDown, Folder, FolderOpen, User, Building2, Calendar, DollarSign, MapPin, Hash, Phone, Package, Tag } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import axios from 'axios';
 import './App.css';
@@ -49,10 +49,6 @@ interface OCRResult {
   document_type: string;
   total_pages?: number;
   entities?: Entities;
-  extracted_text: {
-    raw_text: string;
-    structured_data?: any;
-  };
   metadata: {
     language: string;
     confidence: string;
@@ -63,9 +59,6 @@ interface OCRResult {
       error?: string;
       document_type?: string;
       entities?: Entities;
-      extracted_text?: {
-        raw_text: string;
-      };
       metadata?: {
         language: string;
         confidence: string;
@@ -348,10 +341,6 @@ const App: React.FC = () => {
     multiple: false,
   });
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-  };
-
   const downloadResults = () => {
     if (!result) return;
     const dataStr = JSON.stringify(result.result, null, 2);
@@ -437,10 +426,6 @@ const App: React.FC = () => {
             <h2>Extraction Results</h2>
             {result && (
               <div className="result-actions">
-                <button className="action-btn" onClick={() => copyToClipboard(result.result.extracted_text.raw_text)}>
-                  <Copy size={16} />
-                  Copy Text
-                </button>
                 <button className="action-btn" onClick={downloadResults}>
                   <Download size={16} />
                   Export JSON
@@ -513,12 +498,6 @@ const App: React.FC = () => {
                   </div>
                 )}
 
-                <div className="result-card">
-                  <h3>Raw Text</h3>
-                  <div className="text-content">
-                    {result.result.extracted_text.raw_text}
-                  </div>
-                </div>
 
                 {result.result.metadata.special_elements.length > 0 && (
                   <div className="result-card">
