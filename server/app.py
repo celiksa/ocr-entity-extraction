@@ -2,9 +2,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from ibm_watsonx_ai.foundation_models import ModelInference
-from ibm_watsonx_ai.metanames import GenTextParamsMetaNames as GenParams
-from ibm_watsonx_ai import Credentials
 import base64
 import os
 from typing import Dict, Any, List
@@ -17,6 +14,8 @@ from pdf2image import convert_from_path, convert_from_bytes
 from PIL import Image
 import io
 import tempfile
+import requests
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -38,18 +37,53 @@ current_dir = Path(__file__).parent
 samples_dir = current_dir.parent / "samples"
 app.mount("/samples", StaticFiles(directory=str(samples_dir)), name="samples")
 
-credentials = Credentials(
-    api_key=os.getenv("WATSONX_API_KEY", ""),
-    url=os.getenv("WATSONX_URL", "https://us-south.ml.cloud.ibm.com")
-)
-
-project_id = os.getenv("WATSONX_PROJECT_ID", "")
+# WatsonX.ai configuration
+WATSONX_API_KEY = os.getenv("WATSONX_API_KEY", "")
+WATSONX_URL = os.getenv("WATSONX_URL", "https://us-south.ml.cloud.ibm.com")
+PROJECT_ID = os.getenv("WATSONX_PROJECT_ID", "")
 
 # Model configuration from environment
-model_id = os.getenv("WATSONX_MODEL_ID", "mistralai/mistral-medium-2505")
-max_new_tokens = int(os.getenv("WATSONX_MAX_NEW_TOKENS", "2000"))
-temperature = float(os.getenv("WATSONX_TEMPERATURE", "0.5"))
-top_p = float(os.getenv("WATSONX_TOP_P", "0.95"))
+MODEL_ID = os.getenv("WATSONX_MODEL_ID", "mistralai/mistral-medium-2505")
+MAX_TOKENS = int(os.getenv("WATSONX_MAX_TOKENS", "16000"))
+TEMPERATURE = float(os.getenv("WATSONX_TEMPERATURE", "0.1"))
+TOP_P = float(os.getenv("WATSONX_TOP_P", "0.95"))
+
+# Token management
+access_token = None
+token_expiry = None
+
+def get_access_token():
+    """Get or refresh IBM Cloud access token"""
+    global access_token, token_expiry
+    
+    # Check if we have a valid token
+    if access_token and token_expiry and datetime.now() < token_expiry:
+        return access_token
+    
+    # Get new token
+    token_url = "https://iam.cloud.ibm.com/identity/token"
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json"
+    }
+    data = {
+        "grant_type": "urn:ibm:params:oauth:grant-type:apikey",
+        "apikey": WATSONX_API_KEY
+    }
+    
+    try:
+        response = requests.post(token_url, headers=headers, data=data)
+        response.raise_for_status()
+        
+        token_data = response.json()
+        access_token = token_data["access_token"]
+        # Set expiry to 50 minutes from now (tokens last 60 minutes)
+        token_expiry = datetime.now() + timedelta(minutes=50)
+        
+        return access_token
+    except Exception as e:
+        logger.error(f"Error getting access token: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to authenticate with IBM Cloud")
 
 def encode_image_to_base64(image_data: bytes) -> str:
     """Encode image bytes to base64 string"""
@@ -87,42 +121,19 @@ def is_pdf_file(filename: str) -> bool:
     return filename.lower().endswith('.pdf')
 
 async def process_image_with_watsonx(image_data: bytes) -> Dict[str, Any]:
-    """Process image using watsonx.ai multimodal chat"""
+    """Process image using watsonx.ai multimodal chat via HTTP API"""
     try:
         # Convert image to base64
         image_base64 = encode_image_to_base64(image_data)
         
-        # Use watsonx.ai chat with multimodal support
-        model = ModelInference(
-            model_id=model_id,
-            params={
-
-                GenParams.MAX_NEW_TOKENS: max_new_tokens,
-                GenParams.TEMPERATURE: temperature,
-                GenParams.TOP_P: top_p,
-                
-                
-                
-            },
-            credentials=credentials,
-            project_id=project_id
-        )
+        # Get access token
+        token = get_access_token()
         
-        # Create messages for chat - using the correct format
-        # For multimodal models, images are included in the content with a special format
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_base64}"
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": """You are an advanced entity extraction system. Analyze this document image and extract ALL entities with their values in a highly structured format.
+        # API endpoint
+        url = f"{WATSONX_URL}/ml/v1/text/chat?version=2023-05-29"
+        
+        # System prompt
+        system_prompt = """You are an advanced entity extraction system. Analyze this document image and extract ALL entities with their values in a highly structured format.
 
 CRITICAL: Focus on extracting EVERY entity (person names, organizations, dates, amounts, addresses, phone numbers, emails, IDs, etc.) from the document.
 
@@ -170,51 +181,94 @@ Provide the extracted information in the following JSON format:
 }
 
 IMPORTANT: Extract EVERY piece of information as an entity. Be thorough and precise. Return ONLY valid JSON."""
-                    }
-                ]
-            }
-        ]
+
+        # Request body
+        body = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Extract all entities from this document image."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "project_id": PROJECT_ID,
+            "model_id": MODEL_ID,
+            "frequency_penalty": 0,
+            "max_tokens": MAX_TOKENS,
+            "presence_penalty": 0,
+            "temperature": TEMPERATURE,
+            "top_p": TOP_P
+        }
         
-        response = model.chat(messages=messages)
+        # Headers
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}"
+        }
+        
+        # Make request
+        response = requests.post(url, headers=headers, json=body)
+        
+        if response.status_code != 200:
+            logger.error(f"WatsonX API error: {response.status_code} - {response.text}")
+            raise HTTPException(status_code=response.status_code, detail=f"WatsonX API error: {response.text}")
+        
+        # Parse response
+        data = response.json()
+        
+        # Extract the assistant's response
+        if 'choices' in data and len(data['choices']) > 0:
+            response_text = data['choices'][0]['message']['content']
+        else:
+            logger.error(f"Unexpected response format: {data}")
+            raise HTTPException(status_code=500, detail="Unexpected response format from WatsonX API")
+        
+        # Clean and parse JSON response
+        response_text = response_text.strip()
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+        response_text = response_text.strip()
         
         try:
-            # Extract the content from the response
-            # The response structure might vary, so we handle different formats
-            if isinstance(response, dict):
-                if 'choices' in response:
-                    response_text = response['choices'][0]['message']['content']
-                elif 'results' in response:
-                    response_text = response['results'][0]['generated_text']
-                else:
-                    response_text = str(response)
-            else:
-                response_text = str(response)
-            
-            # Clean the response to ensure it's valid JSON
-            response_text = response_text.strip()
-            if response_text.startswith("```json"):
-                response_text = response_text[7:]
-            if response_text.endswith("```"):
-                response_text = response_text[:-3]
-            response_text = response_text.strip()
-            
             result = json.loads(response_text)
             return result
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.error(f"Error parsing response: {str(e)}, Response: {response}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing JSON response: {str(e)}, Response: {response_text}")
+            # Return a structured error response
             return {
                 "document_type": "unknown",
+                "entities": {},
                 "extracted_text": {
-                    "raw_text": response_text if 'response_text' in locals() else str(response),
-                    "structured_data": {}
+                    "raw_text": response_text
                 },
                 "metadata": {
                     "language": "unknown",
                     "confidence": "low",
-                    "special_elements": []
+                    "document_condition": "error",
+                    "special_elements": [],
+                    "error": "Failed to parse response as JSON"
                 }
             }
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing image with watsonx: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -381,10 +435,10 @@ async def health_check():
         "status": "healthy",
         "watsonx_configured": bool(os.getenv("WATSONX_API_KEY")),
         "model_config": {
-            "model_id": model_id,
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "top_p": top_p
+            "model_id": MODEL_ID,
+            "max_tokens": MAX_TOKENS,
+            "temperature": TEMPERATURE,
+            "top_p": TOP_P
         }
     }
 
